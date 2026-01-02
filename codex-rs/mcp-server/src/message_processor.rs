@@ -7,14 +7,22 @@ use crate::codex_tool_config::create_tool_for_codex_tool_call_param;
 use crate::codex_tool_config::create_tool_for_codex_tool_call_reply_param;
 use crate::error_code::INVALID_REQUEST_ERROR_CODE;
 use crate::outgoing_message::OutgoingMessageSender;
+use crate::outgoing_message::OutgoingNotificationMeta;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 
 use codex_core::AuthManager;
+use codex_core::NewThread;
+use codex_core::RolloutRecorder;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::default_client::USER_AGENT_SUFFIX;
 use codex_core::default_client::get_codex_user_agent;
+use codex_core::find_conversation_path_by_id_str;
+use codex_core::protocol::Event;
+use codex_core::protocol::EventMsg;
+use codex_core::protocol::InitialHistory;
+use codex_core::protocol::RolloutItem;
 use codex_core::protocol::Submission;
 use mcp_types::CallToolRequestParams;
 use mcp_types::CallToolResult;
@@ -40,11 +48,59 @@ pub(crate) struct MessageProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     initialized: bool,
     codex_linux_sandbox_exe: Option<PathBuf>,
+    config: Arc<Config>,
+    auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
     running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ThreadId>>>,
 }
 
 impl MessageProcessor {
+    fn apply_resume_settings_from_rollout(config: &mut Config, initial_history: &InitialHistory) {
+        let InitialHistory::Resumed(resumed) = initial_history else {
+            return;
+        };
+
+        let items = resumed.history.as_slice();
+        let last_turn_ctx = items.iter().rev().find_map(|it| match it {
+            RolloutItem::TurnContext(ctx) => Some(ctx),
+            _ => None,
+        });
+
+        // Prefer the most recent TurnContextItem; fall back to SessionMeta cwd if needed.
+        if let Some(ctx) = last_turn_ctx {
+            // Restore session root directory.
+            if ctx.cwd.is_absolute() {
+                config.cwd = ctx.cwd.clone();
+            }
+
+            // Restore model selection and reasoning parameters used in the rollout.
+            config.model = Some(ctx.model.clone());
+            config.model_reasoning_effort = ctx.effort;
+            config.model_reasoning_summary = ctx.summary;
+
+            // Restore approval + sandbox policy (best-effort; constraints may reject).
+            if config.approval_policy.can_set(&ctx.approval_policy).is_ok() {
+                let _ = config.approval_policy.set(ctx.approval_policy);
+            }
+            if config.sandbox_policy.can_set(&ctx.sandbox_policy).is_ok() {
+                let _ = config.sandbox_policy.set(ctx.sandbox_policy.clone());
+            }
+
+            // These were explicitly set for the original session; preserve that signal.
+            config.did_user_set_custom_approval_policy_or_sandbox_mode = true;
+            return;
+        }
+
+        // Fallback: use the SessionMeta cwd if present.
+        if let Some(meta) = items.iter().find_map(|it| match it {
+            RolloutItem::SessionMeta(line) => Some(&line.meta),
+            _ => None,
+        }) && meta.cwd.is_absolute()
+        {
+            config.cwd = meta.cwd.clone();
+        }
+    }
+
     /// Create a new `MessageProcessor`, retaining a handle to the outgoing
     /// `Sender` so handlers can enqueue messages to be written to stdout.
     pub(crate) fn new(
@@ -60,13 +116,15 @@ impl MessageProcessor {
         );
         let thread_manager = Arc::new(ThreadManager::new(
             config.codex_home.clone(),
-            auth_manager,
+            auth_manager.clone(),
             SessionSource::Mcp,
         ));
         Self {
             outgoing,
             initialized: false,
             codex_linux_sandbox_exe,
+            config,
+            auth_manager,
             thread_manager,
             running_requests_id_to_codex_uuid: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -433,7 +491,10 @@ impl MessageProcessor {
         tracing::info!("tools/call -> params: {:?}", arguments);
 
         // parse arguments
-        let codex_tool_call_reply_param: CodexToolCallReplyParam = match arguments {
+        let CodexToolCallReplyParam {
+            conversation_id,
+            prompt,
+        } = match arguments {
             Some(json_val) => match serde_json::from_value::<CodexToolCallReplyParam>(json_val) {
                 Ok(params) => params,
                 Err(e) => {
@@ -454,12 +515,12 @@ impl MessageProcessor {
             },
             None => {
                 tracing::error!(
-                    "Missing arguments for codex-reply tool-call; the `thread_id` and `prompt` fields are required."
+                    "Missing arguments for codex-reply tool-call; the `conversation_id` and `prompt` fields are required."
                 );
                 let result = CallToolResult {
                     content: vec![ContentBlock::TextContent(TextContent {
                         r#type: "text".to_owned(),
-                        text: "Missing arguments for codex-reply tool-call; the `thread_id` and `prompt` fields are required.".to_owned(),
+                        text: "Missing arguments for codex-reply tool-call; the `conversation_id` and `prompt` fields are required.".to_owned(),
                         annotations: None,
                     })],
                     is_error: Some(true),
@@ -470,15 +531,14 @@ impl MessageProcessor {
                 return;
             }
         };
-
-        let thread_id = match codex_tool_call_reply_param.get_thread_id() {
+        let conversation_id = match ThreadId::from_string(&conversation_id) {
             Ok(id) => id,
             Err(e) => {
-                tracing::error!("Failed to parse thread_id: {e}");
+                tracing::error!("Failed to parse conversation_id: {e}");
                 let result = CallToolResult {
                     content: vec![ContentBlock::TextContent(TextContent {
                         r#type: "text".to_owned(),
-                        text: format!("Failed to parse thread_id: {e}"),
+                        text: format!("Failed to parse conversation_id: {e}"),
                         annotations: None,
                     })],
                     is_error: Some(true),
@@ -494,40 +554,132 @@ impl MessageProcessor {
         let outgoing = self.outgoing.clone();
         let running_requests_id_to_codex_uuid = self.running_requests_id_to_codex_uuid.clone();
 
-        let codex = match self.thread_manager.get_thread(thread_id).await {
-            Ok(c) => c,
+        let (codex, conversation_id) = match self.thread_manager.get_thread(conversation_id).await {
+            Ok(c) => (c, conversation_id),
             Err(_) => {
-                tracing::warn!("Session not found for thread_id: {thread_id}");
-                let result = CallToolResult {
-                    content: vec![ContentBlock::TextContent(TextContent {
-                        r#type: "text".to_owned(),
-                        text: format!("Session not found for thread_id: {thread_id}"),
-                        annotations: None,
-                    })],
-                    is_error: Some(true),
-                    structured_content: Some(json!({
-                        "threadId": thread_id,
-                    })),
+                tracing::warn!(
+                    "Session not found for conversation_id: {conversation_id}; attempting resume from rollout"
+                );
+
+                let rollout_path = match find_conversation_path_by_id_str(
+                    &self.config.codex_home,
+                    &conversation_id.to_string(),
+                )
+                .await
+                {
+                    Ok(Some(p)) => p,
+                    Ok(None) => {
+                        let result = CallToolResult {
+                            content: vec![ContentBlock::TextContent(TextContent {
+                                r#type: "text".to_owned(),
+                                text: format!(
+                                    "Session not found for conversation_id: {conversation_id}"
+                                ),
+                                annotations: None,
+                            })],
+                            is_error: Some(true),
+                            structured_content: None,
+                        };
+                        outgoing.send_response(request_id, result).await;
+                        return;
+                    }
+                    Err(e) => {
+                        let result = CallToolResult {
+                            content: vec![ContentBlock::TextContent(TextContent {
+                                r#type: "text".to_owned(),
+                                text: format!(
+                                    "Failed to locate rollout for conversation_id {conversation_id}: {e}"
+                                ),
+                                annotations: None,
+                            })],
+                            is_error: Some(true),
+                            structured_content: None,
+                        };
+                        outgoing.send_response(request_id, result).await;
+                        return;
+                    }
                 };
-                outgoing.send_response(request_id, result).await;
-                return;
+
+                let initial_history = match RolloutRecorder::get_rollout_history(&rollout_path)
+                    .await
+                {
+                    Ok(h) => h,
+                    Err(e) => {
+                        let result = CallToolResult {
+                            content: vec![ContentBlock::TextContent(TextContent {
+                                r#type: "text".to_owned(),
+                                text: format!(
+                                    "Failed to read rollout for conversation_id {conversation_id}: {e}"
+                                ),
+                                annotations: None,
+                            })],
+                            is_error: Some(true),
+                            structured_content: None,
+                        };
+                        outgoing.send_response(request_id, result).await;
+                        return;
+                    }
+                };
+
+                let mut config = self.config.as_ref().clone();
+                Self::apply_resume_settings_from_rollout(&mut config, &initial_history);
+                let auth_manager = self.auth_manager.clone();
+                match self
+                    .thread_manager
+                    .resume_thread_with_history(config, initial_history, auth_manager)
+                    .await
+                {
+                    Ok(NewThread {
+                        thread_id: resumed_id,
+                        thread: conversation,
+                        session_configured,
+                    }) => {
+                        let session_configured_event = Event {
+                            id: "".to_string(),
+                            msg: EventMsg::SessionConfigured(session_configured.clone()),
+                        };
+                        outgoing
+                            .send_event_as_notification(
+                                &session_configured_event,
+                                Some(OutgoingNotificationMeta::new(Some(request_id.clone()))),
+                            )
+                            .await;
+
+                        (conversation, resumed_id)
+                    }
+                    Err(e) => {
+                        let result = CallToolResult {
+                            content: vec![ContentBlock::TextContent(TextContent {
+                                r#type: "text".to_owned(),
+                                text: format!(
+                                    "Failed to resume Codex session {conversation_id} from rollout: {e}"
+                                ),
+                                annotations: None,
+                            })],
+                            is_error: Some(true),
+                            structured_content: None,
+                        };
+                        outgoing.send_response(request_id, result).await;
+                        return;
+                    }
+                }
             }
         };
 
         // Spawn the long-running reply handler.
-        let prompt = codex_tool_call_reply_param.prompt.clone();
         tokio::spawn({
             let outgoing = outgoing.clone();
+            let prompt = prompt.clone();
             let running_requests_id_to_codex_uuid = running_requests_id_to_codex_uuid.clone();
 
             async move {
                 crate::codex_tool_runner::run_codex_tool_session_reply(
-                    thread_id,
                     codex,
                     outgoing,
                     request_id,
                     prompt,
                     running_requests_id_to_codex_uuid,
+                    conversation_id,
                 )
                 .await;
             }
@@ -563,8 +715,8 @@ impl MessageProcessor {
             RequestId::Integer(i) => i.to_string(),
         };
 
-        // Obtain the thread id while holding the first lock, then release.
-        let thread_id = {
+        // Obtain the conversation id while holding the first lock, then release.
+        let conversation_id = {
             let map_guard = self.running_requests_id_to_codex_uuid.lock().await;
             match map_guard.get(&request_id) {
                 Some(id) => *id,
@@ -574,13 +726,13 @@ impl MessageProcessor {
                 }
             }
         };
-        tracing::info!("thread_id: {thread_id}");
+        tracing::info!("conversation_id: {conversation_id}");
 
         // Obtain the Codex thread from the server.
-        let codex_arc = match self.thread_manager.get_thread(thread_id).await {
+        let codex_arc = match self.thread_manager.get_thread(conversation_id).await {
             Ok(c) => c,
             Err(_) => {
-                tracing::warn!("Session not found for thread_id: {thread_id}");
+                tracing::warn!("Session not found for conversation_id: {conversation_id}");
                 return;
             }
         };
