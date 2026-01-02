@@ -21,6 +21,13 @@ pub struct CodexToolCallParam {
     /// The *initial user prompt* to start the Codex conversation.
     pub prompt: String,
 
+    /// Optional rollout file path to resume from (a `rollout-*.jsonl` file under
+    /// `CODEX_HOME/sessions/...`). When provided, the MCP server will resume the
+    /// conversation history from this file before submitting `prompt` as the
+    /// next user message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_rollout_path: Option<String>,
+
     /// Optional override for the model name (e.g. "o3", "o4-mini").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
@@ -141,9 +148,10 @@ impl CodexToolCallParam {
     pub async fn into_config(
         self,
         codex_linux_sandbox_exe: Option<PathBuf>,
-    ) -> std::io::Result<(String, Config)> {
+    ) -> std::io::Result<(String, Config, Option<String>)> {
         let Self {
             prompt,
+            resume_rollout_path,
             model,
             profile,
             cwd,
@@ -178,7 +186,7 @@ impl CodexToolCallParam {
         let cfg =
             Config::load_with_cli_overrides_and_harness_overrides(cli_overrides, overrides).await?;
 
-        Ok((prompt, cfg))
+        Ok((prompt, cfg, resume_rollout_path))
     }
 }
 
@@ -289,6 +297,10 @@ mod tests {
               },
               "prompt": {
                 "description": "The *initial user prompt* to start the Codex conversation.",
+                "type": "string"
+              },
+              "resume-rollout-path": {
+                "description": "Optional rollout file path to resume from (a `rollout-*.jsonl` file under `CODEX_HOME/sessions/...`). When provided, the MCP server will resume the conversation history from this file before submitting `prompt` as the next user message.",
                 "type": "string"
               },
               "base-instructions": {

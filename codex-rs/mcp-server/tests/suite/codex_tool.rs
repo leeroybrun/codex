@@ -12,6 +12,12 @@ use codex_mcp_server::ExecApprovalElicitRequestParams;
 use codex_mcp_server::ExecApprovalResponse;
 use codex_mcp_server::PatchApprovalElicitRequestParams;
 use codex_mcp_server::PatchApprovalResponse;
+use codex_protocol::ConversationId;
+use codex_protocol::protocol::RolloutItem;
+use codex_protocol::protocol::RolloutLine;
+use codex_protocol::protocol::SessionMeta;
+use codex_protocol::protocol::SessionMetaLine;
+use codex_protocol::protocol::SessionSource;
 use mcp_types::ElicitRequest;
 use mcp_types::ElicitRequestParamsRequestedSchema;
 use mcp_types::JSONRPC_VERSION;
@@ -35,6 +41,165 @@ use mcp_test_support::format_with_current_shell;
 
 // Allow ample time on slower CI or under load to avoid flakes.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+fn write_minimal_rollout_file(
+    codex_home: &Path,
+    conversation_id: ConversationId,
+) -> anyhow::Result<PathBuf> {
+    // Place the rollout under CODEX_HOME/sessions/... (required by the MCP server validation).
+    let day_dir = codex_home.join("sessions").join("2025").join("01").join("01");
+    std::fs::create_dir_all(&day_dir)?;
+    let rollout_path = day_dir.join(format!(
+        "rollout-2025-01-01T00-00-00-{conversation_id}.jsonl"
+    ));
+
+    let session_meta = SessionMeta {
+        id: conversation_id,
+        timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+        cwd: codex_home.to_path_buf(),
+        originator: "mcp-server-test".to_string(),
+        cli_version: "0.0.0".to_string(),
+        instructions: None,
+        source: SessionSource::Mcp,
+        model_provider: Some("mock_provider".to_string()),
+    };
+    let line = RolloutLine {
+        timestamp: "2025-01-01T00:00:00.000Z".to_string(),
+        item: RolloutItem::SessionMeta(SessionMetaLine {
+            meta: session_meta,
+            git: None,
+        }),
+    };
+
+    std::fs::write(&rollout_path, format!("{}\n", serde_json::to_string(&line)?))?;
+    Ok(rollout_path)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_codex_tool_supports_resume_rollout_path() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+    if let Err(err) = codex_tool_supports_resume_rollout_path().await {
+        panic!("failure: {err}");
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_codex_tool_rejects_resume_rollout_path_outside_sessions_dir() {
+    if env::var(CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR).is_ok() {
+        println!(
+            "Skipping test because it cannot execute when network is disabled in a Codex sandbox."
+        );
+        return;
+    }
+    if let Err(err) = codex_tool_rejects_resume_rollout_path_outside_sessions_dir().await {
+        panic!("failure: {err}");
+    }
+}
+
+async fn codex_tool_supports_resume_rollout_path() -> anyhow::Result<()> {
+    // Provide a single assistant response so the session can complete.
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir,
+    } = create_mcp_process(vec![create_final_assistant_message_sse_response("OK")?]).await?;
+
+    let conversation_id = ConversationId::new();
+    let rollout_path = write_minimal_rollout_file(dir.path(), conversation_id)?;
+
+    let codex_request_id = mcp_process
+        .send_codex_tool_call(CodexToolCallParam {
+            prompt: "hello".to_string(),
+            resume_rollout_path: Some(rollout_path.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await?;
+
+    // The MCP server emits session_configured as a notification before the tool call response.
+    let session_configured = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_session_configured_notification(),
+    )
+    .await??;
+
+    let msg = session_configured
+        .params
+        .as_ref()
+        .and_then(|p| p.get("msg"))
+        .cloned()
+        .unwrap_or_default();
+    let expected = conversation_id.to_string();
+    assert_eq!(
+        msg.get("session_id").and_then(|v| v.as_str()),
+        Some(expected.as_str()),
+        "expected resumed session_id to match the rollout file's ConversationId"
+    );
+
+    // Ensure the tool call still completes.
+    let _codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message(RequestId::Integer(codex_request_id)),
+    )
+    .await??;
+
+    Ok(())
+}
+
+async fn codex_tool_rejects_resume_rollout_path_outside_sessions_dir() -> anyhow::Result<()> {
+    // No model calls should happen (the path is rejected before starting a session).
+    let McpHandle {
+        process: mut mcp_process,
+        server: _server,
+        dir,
+    } = create_mcp_process(vec![]).await?;
+
+    // Ensure sessions dir exists so the error is specifically about "must be under sessions".
+    std::fs::create_dir_all(dir.path().join("sessions"))?;
+    let bad_path = dir.path().join("outside.jsonl");
+    std::fs::write(&bad_path, "not a real rollout\n")?;
+
+    let codex_request_id = mcp_process
+        .send_codex_tool_call(CodexToolCallParam {
+            prompt: "hello".to_string(),
+            resume_rollout_path: Some(bad_path.to_string_lossy().to_string()),
+            ..Default::default()
+        })
+        .await?;
+
+    let codex_response = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp_process.read_stream_until_response_message(RequestId::Integer(codex_request_id)),
+    )
+    .await??;
+
+    assert_eq!(
+        codex_response
+            .result
+            .get("isError")
+            .and_then(|v| v.as_bool()),
+        Some(true),
+        "expected MCP tool response to be marked as error"
+    );
+    let text = codex_response
+        .result
+        .get("content")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("text"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        text.contains("resume-rollout-path must be under"),
+        "expected a helpful validation message, got: {text:?}"
+    );
+    Ok(())
+}
 
 /// Test that a shell command that is not on the "trusted" list triggers an
 /// elicitation request to the MCP and that sending the approval runs the

@@ -334,4 +334,48 @@ impl McpProcess {
             }
         }
     }
+
+    /// Reads notifications until a SessionConfigured event is observed:
+    /// Method "codex/event" with params.msg.type == "session_configured".
+    pub async fn read_stream_until_session_configured_notification(
+        &mut self,
+    ) -> anyhow::Result<JSONRPCNotification> {
+        eprintln!("in read_stream_until_session_configured_notification()");
+
+        loop {
+            let message = self.read_jsonrpc_message().await?;
+            match message {
+                JSONRPCMessage::Notification(notification) => {
+                    let is_match = if notification.method == "codex/event" {
+                        if let Some(params) = &notification.params {
+                            params
+                                .get("msg")
+                                .and_then(|m| m.get("type"))
+                                .and_then(|t| t.as_str())
+                                == Some("session_configured")
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_match {
+                        return Ok(notification);
+                    } else {
+                        eprintln!("ignoring notification: {notification:?}");
+                    }
+                }
+                JSONRPCMessage::Request(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");
+                }
+                JSONRPCMessage::Error(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Error: {message:?}");
+                }
+                JSONRPCMessage::Response(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Response: {message:?}");
+                }
+            }
+        }
+    }
 }

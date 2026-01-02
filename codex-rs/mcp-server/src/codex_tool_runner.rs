@@ -3,12 +3,15 @@
 //! and to make future feature-growth easier to manage.
 
 use std::collections::HashMap;
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::exec_approval::handle_exec_approval_request;
 use crate::outgoing_message::OutgoingMessageSender;
 use crate::outgoing_message::OutgoingNotificationMeta;
 use crate::patch_approval::handle_patch_approval_request;
+use codex_core::AuthManager;
 use codex_core::CodexConversation;
 use codex_core::ConversationManager;
 use codex_core::NewConversation;
@@ -32,6 +35,36 @@ use tokio::sync::Mutex;
 
 pub(crate) const INVALID_PARAMS_ERROR_CODE: i64 = -32602;
 
+fn validate_resume_rollout_path(codex_home: &Path, resume_rollout_path: &str) -> Result<PathBuf, String> {
+    let sessions_root = codex_home.join("sessions");
+    let sessions_root = std::fs::canonicalize(&sessions_root).map_err(|e| {
+        format!(
+            "Failed to resolve CODEX_HOME sessions dir at {}: {e}",
+            sessions_root.display()
+        )
+    })?;
+
+    let requested = PathBuf::from(resume_rollout_path);
+    let requested = std::fs::canonicalize(&requested).map_err(|e| {
+        format!(
+            "Failed to resolve resume-rollout-path at {}: {e}",
+            requested.display()
+        )
+    })?;
+
+    if requested.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+        return Err("resume-rollout-path must point to a .jsonl rollout file".to_string());
+    }
+    if !requested.starts_with(&sessions_root) {
+        return Err(format!(
+            "resume-rollout-path must be under {}",
+            sessions_root.display()
+        ));
+    }
+
+    Ok(requested)
+}
+
 /// Run a complete Codex session and stream events back to the client.
 ///
 /// On completion (success or error) the function sends the appropriate
@@ -40,15 +73,45 @@ pub async fn run_codex_tool_session(
     id: RequestId,
     initial_prompt: String,
     config: CodexConfig,
+    resume_rollout_path: Option<String>,
     outgoing: Arc<OutgoingMessageSender>,
     conversation_manager: Arc<ConversationManager>,
+    auth_manager: Arc<AuthManager>,
     running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ConversationId>>>,
 ) {
+    let codex_home = config.codex_home.clone();
+    let resume_rollout_path = match resume_rollout_path {
+        Some(path) => match validate_resume_rollout_path(&codex_home, &path) {
+            Ok(validated) => Some(validated),
+            Err(message) => {
+                let result = CallToolResult {
+                    content: vec![ContentBlock::TextContent(TextContent {
+                        r#type: "text".to_string(),
+                        text: message,
+                        annotations: None,
+                    })],
+                    is_error: Some(true),
+                    structured_content: None,
+                };
+                outgoing.send_response(id.clone(), result).await;
+                return;
+            }
+        },
+        None => None,
+    };
+
+    let conversation_result = match resume_rollout_path {
+        Some(path) => conversation_manager
+            .resume_conversation_from_rollout(config, path, auth_manager)
+            .await,
+        None => conversation_manager.new_conversation(config).await,
+    };
+
     let NewConversation {
         conversation_id,
         conversation,
         session_configured,
-    } = match conversation_manager.new_conversation(config).await {
+    } = match conversation_result {
         Ok(res) => res,
         Err(e) => {
             let result = CallToolResult {

@@ -40,6 +40,7 @@ pub(crate) struct MessageProcessor {
     outgoing: Arc<OutgoingMessageSender>,
     initialized: bool,
     codex_linux_sandbox_exe: Option<PathBuf>,
+    auth_manager: Arc<AuthManager>,
     conversation_manager: Arc<ConversationManager>,
     running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ConversationId>>>,
 }
@@ -59,11 +60,12 @@ impl MessageProcessor {
             config.cli_auth_credentials_store_mode,
         );
         let conversation_manager =
-            Arc::new(ConversationManager::new(auth_manager, SessionSource::Mcp));
+            Arc::new(ConversationManager::new(auth_manager.clone(), SessionSource::Mcp));
         Self {
             outgoing,
             initialized: false,
             codex_linux_sandbox_exe,
+            auth_manager,
             conversation_manager,
             running_requests_id_to_codex_uuid: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -344,7 +346,8 @@ impl MessageProcessor {
         }
     }
     async fn handle_tool_call_codex(&self, id: RequestId, arguments: Option<serde_json::Value>) {
-        let (initial_prompt, config): (String, Config) = match arguments {
+        let (initial_prompt, config, resume_rollout_path): (String, Config, Option<String>) =
+            match arguments {
             Some(json_val) => match serde_json::from_value::<CodexToolCallParam>(json_val) {
                 Ok(tool_cfg) => match tool_cfg
                     .into_config(self.codex_linux_sandbox_exe.clone())
@@ -404,6 +407,7 @@ impl MessageProcessor {
         // Clone outgoing and server to move into async task.
         let outgoing = self.outgoing.clone();
         let conversation_manager = self.conversation_manager.clone();
+        let auth_manager = self.auth_manager.clone();
         let running_requests_id_to_codex_uuid = self.running_requests_id_to_codex_uuid.clone();
 
         // Spawn an async task to handle the Codex session so that we do not
@@ -414,8 +418,10 @@ impl MessageProcessor {
                 id,
                 initial_prompt,
                 config,
+                resume_rollout_path,
                 outgoing,
                 conversation_manager,
+                auth_manager,
                 running_requests_id_to_codex_uuid,
             )
             .await;
