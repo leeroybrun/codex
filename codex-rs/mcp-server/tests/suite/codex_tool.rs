@@ -13,7 +13,7 @@ use codex_mcp_server::ExecApprovalElicitRequestParams;
 use codex_mcp_server::ExecApprovalResponse;
 use codex_mcp_server::PatchApprovalElicitRequestParams;
 use codex_mcp_server::PatchApprovalResponse;
-use codex_protocol::ConversationId;
+use codex_protocol::ThreadId;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::RolloutLine;
@@ -48,7 +48,7 @@ const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 fn write_minimal_rollout_file(
     codex_home: &Path,
-    conversation_id: ConversationId,
+    conversation_id: ThreadId,
 ) -> anyhow::Result<PathBuf> {
     // Place the rollout under CODEX_HOME/sessions/... so the MCP server can locate it.
     let day_dir = codex_home
@@ -131,7 +131,7 @@ async fn codex_reply_tool_resumes_from_rollout_when_not_in_memory() -> anyhow::R
         dir,
     } = create_mcp_process(vec![create_final_assistant_message_sse_response("OK")?]).await?;
 
-    let conversation_id = ConversationId::new();
+    let conversation_id = ThreadId::new();
     let _rollout_path = write_minimal_rollout_file(dir.path(), conversation_id)?;
 
     let reply_request_id = mcp_process
@@ -158,7 +158,7 @@ async fn codex_reply_tool_resumes_from_rollout_when_not_in_memory() -> anyhow::R
     assert_eq!(
         msg.get("session_id").and_then(|v| v.as_str()),
         Some(expected.as_str()),
-        "expected resumed session_id to match the rollout file's ConversationId"
+        "expected resumed session_id to match the rollout file's ThreadId"
     );
     let expected_cwd = dir.path().join("resumed-workdir");
     assert_eq!(
