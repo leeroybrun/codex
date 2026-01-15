@@ -80,52 +80,15 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Determine the latest *stable production release tag that our current branch is based on*.
-          #
-          # Concretely: the newest ancestor tag of HEAD that corresponds to a non-draft,
-          # non-prerelease GitHub Release in openai/codex.
-          #
-          # We do it this way to avoid falsely labeling a fork build as "0.84.0" if our HEAD
-          # doesn't include that upstream release yet.
-          base_tag=""
-          mapfile -t candidates < <(
-            git tag -l 'rust-v*' --merged HEAD --sort=-creatordate
-          )
+          # We base our stable branch on upstream release tags (e.g. rust-v0.84.0), but those tags
+          # do NOT exist in our fork repo unless explicitly pushed. Fetch upstream tags so
+          # `git describe` can resolve the correct stable base version.
+          git remote add upstream https://github.com/openai/codex.git 2>/dev/null || true
+          git fetch upstream --tags --force
 
-          if ((${#candidates[@]} == 0)); then
-            echo "No rust-v* tags are ancestors of HEAD; cannot label release version."
-            exit 1
-          fi
-
-          for t in "${candidates[@]}"; do
-            # Fast filter: only consider version-like tags (no prerelease suffix).
-            if [[ ! "$t" =~ ^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
-              continue
-            fi
-
-            # Confirm this tag corresponds to a stable GitHub Release in openai/codex.
-            # (Works even when our fork doesn't have upstream's release workflow.)
-            rel_json="$(curl -fsSL \
-              -H "Accept: application/vnd.github+json" \
-              -H "Authorization: Bearer ${{ github.token }}" \
-              -H "X-GitHub-Api-Version: 2022-11-28" \
-              "https://api.github.com/repos/openai/codex/releases/tags/${t}" \
-              || true)"
-
-            if [[ -z "$rel_json" ]]; then
-              continue
-            fi
-
-            if echo "$rel_json" | jq -e '.draft == false and .prerelease == false' >/dev/null 2>&1; then
-              base_tag="$t"
-              break
-            fi
-          done
-
+          base_tag="$(git describe --tags --match 'rust-v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 HEAD)"
           if [[ -z "${base_tag}" ]]; then
-            echo "Failed to determine a stable rust-vX.Y.Z release tag that is an ancestor of HEAD."
-            echo "Candidates (ancestors):"
-            printf '  - %s\n' "${candidates[@]}"
+            echo "Failed to determine base rust-vX.Y.Z tag via git describe."
             exit 1
           fi
 
