@@ -90,98 +90,92 @@ jobs:
             steps.upstream.outputs.tag
           }}; nothing to do."
 
-      - name: Create update branch from new tag
+      - name: Create merge attempt branch from stable
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
+        id: prep
         shell: bash
         run: |
           set -euo pipefail
           new_tag="${{ steps.upstream.outputs.tag }}"
           old_tag="${{ steps.current.outputs.tag }}"
 
-          git switch --detach "${new_tag}"
-          git switch -c "bot/sync-${new_tag}"
+          merge_branch="bot/merge-${new_tag}"
+          tag_branch="bot/tag-${new_tag}"
 
-          echo "Base: ${old_tag} -> ${new_tag}"
+          echo "new_tag=${new_tag}" >> "$GITHUB_OUTPUT"
+          echo "old_tag=${old_tag}" >> "$GITHUB_OUTPUT"
+          echo "merge_branch=${merge_branch}" >> "$GITHUB_OUTPUT"
+          echo "tag_branch=${tag_branch}" >> "$GITHUB_OUTPUT"
 
-      - name: Cherry-pick fork patches (open PR even if some conflict)
+          git checkout -B "${merge_branch}" "origin/${STABLE_BRANCH}"
+
+      - name: Attempt merge of new upstream tag into stable (preferred)
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
-        id: replay
+        id: merge
         shell: bash
         run: |
           set -euo pipefail
-          new_tag="${{ steps.upstream.outputs.tag }}"
-          old_tag="${{ steps.current.outputs.tag }}"
-          stable_ref="origin/${{ env.STABLE_BRANCH }}"
+          new_tag="${{ steps.prep.outputs.new_tag }}"
+          old_tag="${{ steps.prep.outputs.old_tag }}"
 
-          # Replay exactly the commits that are on the stable branch above the old tag.
-          mapfile -t commits < <(git log --reverse "${old_tag}..${stable_ref}" --pretty=%H)
-
-          if ((${#commits[@]} == 0)); then
-            echo "No fork patch commits found on ${stable_ref} above ${old_tag}. Nothing to replay."
-            echo "applied=0" >> "$GITHUB_OUTPUT"
-            echo "had_conflict=false" >> "$GITHUB_OUTPUT"
-            echo "conflict_sha=" >> "$GITHUB_OUTPUT"
-            echo "failed_commits=" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          applied=0
-          conflict_sha=""
-          failed=()
-          for sha in "${commits[@]}"; do
-            echo "Cherry-picking ${sha}"
-            if git cherry-pick "${sha}"; then
-              applied=$((applied + 1))
-            else
-              conflict_sha="${sha}"
-              failed+=("${sha}")
-              echo "Conflict encountered at ${sha}. Aborting this cherry-pick and continuing with the remaining commits."
-              git cherry-pick --abort || true
-              continue
-            fi
-          done
-
-          echo "applied=${applied}" >> "$GITHUB_OUTPUT"
-          if ((${#failed[@]} > 0)); then
-            echo "had_conflict=true" >> "$GITHUB_OUTPUT"
+          echo "Merging ${new_tag} into ${STABLE_BRANCH} (current base: ${old_tag})"
+          if git merge --no-ff --no-commit "${new_tag}"; then
+            git commit -m "Merge ${new_tag} into ${STABLE_BRANCH}"
+            echo "mode=merge" >> "$GITHUB_OUTPUT"
           else
-            echo "had_conflict=false" >> "$GITHUB_OUTPUT"
+            echo "Merge conflict. Leaving this for a tag-based PR so conflicts are visible in GitHub UI."
+            git merge --abort || true
+            echo "mode=tag-pr" >> "$GITHUB_OUTPUT"
           fi
-          echo "conflict_sha=${conflict_sha}" >> "$GITHUB_OUTPUT"
 
-          {
-            echo "failed_commits<<'EOF'"
-            printf '%s\n' "${failed[@]}"
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+      - name: Push merge attempt branch (clean merges only)
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && steps.merge.outputs.mode == 'merge' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git push -u origin "${{ steps.prep.outputs.merge_branch }}" --force-with-lease
 
-      - name: Open PR
-        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
-        uses: peter-evans/create-pull-request@v8
-        with:
-          branch: bot/sync-${{ steps.upstream.outputs.tag }}
-          title: "Sync mcp-resume-fork/stable to ${{ steps.upstream.outputs.tag }}"
-          body: |
-            Automated stable-base bump for this fork.
+      - name: Create tag branch (conflict PR)
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && steps.merge.outputs.mode == 'tag-pr' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          new_tag="${{ steps.prep.outputs.new_tag }}"
+          tag_branch="${{ steps.prep.outputs.tag_branch }}"
+          git checkout -B "${tag_branch}" "${new_tag}"
+          git push -u origin "${tag_branch}" --force-with-lease
 
-            - From: ${{ steps.current.outputs.tag }}
-            - To:   ${{ steps.upstream.outputs.tag }}
-            - Replay: applied ${{ steps.replay.outputs.applied }} commit(s)
-            - Conflict: ${{ steps.replay.outputs.had_conflict }}
-            - First conflict commit (if any): ${{ steps.replay.outputs.conflict_sha }}
-            - Failed commits (if any):
-            ${{ steps.replay.outputs.failed_commits }}
+      - name: Open PR (merge succeeded)
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && steps.merge.outputs.mode == 'merge' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          new_tag="${{ steps.prep.outputs.new_tag }}"
+          merge_branch="${{ steps.prep.outputs.merge_branch }}"
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base "${STABLE_BRANCH}" \
+            --head "${merge_branch}" \
+            --title "Merge ${new_tag} into ${STABLE_BRANCH}" \
+            --body "Automated merge of upstream stable tag ${new_tag} into ${STABLE_BRANCH}."
 
-            If there are failed commits, apply them manually on this PR branch (recommended locally):
-
-            - `git fetch origin`
-            - `git switch bot/sync-${{ steps.upstream.outputs.tag }}`
-            - For each failed SHA: `git cherry-pick <sha>` and resolve conflicts
-            - Push updates and GitHub will update this PR
-
-            This PR was created by `.github/workflows/fork-sync-stable.yml`.
-          base: ${{ env.STABLE_BRANCH }}
-          labels: |
-            maintenance
-          delete-branch: true
+      - name: Open PR (merge conflicts – resolve in GitHub UI)
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && steps.merge.outputs.mode == 'tag-pr' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          new_tag="${{ steps.prep.outputs.new_tag }}"
+          tag_branch="${{ steps.prep.outputs.tag_branch }}"
+          gh pr create \
+            --repo "${GITHUB_REPOSITORY}" \
+            --base "${STABLE_BRANCH}" \
+            --head "${tag_branch}" \
+            --title "Merge ${new_tag} into ${STABLE_BRANCH} (conflicts expected)" \
+            --body $'Automated PR to merge upstream stable tag into the fork stable branch.\n\nThis merge had conflicts in CI, so this PR is intended for manual conflict resolution in GitHub UI.\n\nUpstream tag: '"${new_tag}"$'\nBase branch: '"${STABLE_BRANCH}"
 
