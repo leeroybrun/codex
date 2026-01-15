@@ -4,7 +4,7 @@ on:
   push:
     branches:
       # Build+release from the stable-base branch only, so the version label is truthful.
-      - fork/stable
+      - mcp-resume-fork/stable
   workflow_dispatch: {}
 
 jobs:

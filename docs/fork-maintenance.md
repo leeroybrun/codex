@@ -9,7 +9,7 @@ The goal is:
 
 ## Branch model
 
-- **`fork/stable`** (or your chosen stable branch): upstream stable tag + our fork patches on top.
+- **`mcp-resume-fork/stable`** (stable branch): upstream stable tag + our fork patches on top.
   - This is the branch we build/release from.
 - **`fork/patches`** (optional, but recommended): *only* our fork commits (no upstream merges).
   - This branch is the source-of-truth for “our changes” and is what we replay onto new tags.
@@ -23,7 +23,7 @@ Assumptions:
 
 - upstream remote is named `upstream` and points to `openai/codex`
 - fork remote is named `origin`
-- you release from `fork/stable`
+- you release from `mcp-resume-fork/stable`
 
 ### 1) Fetch upstream tags and refs
 
@@ -43,7 +43,7 @@ Call this `NEW_TAG` (example: `rust-v0.84.0`).
 ### 3) Determine the current base tag of `fork/stable`
 
 ```bash
-git describe --tags --match 'rust-v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 origin/fork/stable
+git describe --tags --match 'rust-v[0-9]*.[0-9]*.[0-9]*' --abbrev=0 origin/mcp-resume-fork/stable
 ```
 
 Call this `OLD_TAG`.
@@ -68,7 +68,7 @@ git cherry-pick "origin/fork/patches"
 **Alternative (replay what’s on `fork/stable` since the old tag):**
 
 ```bash
-git log --reverse "${OLD_TAG}..origin/fork/stable" --pretty=%H > /tmp/fork-patch-commits.txt
+git log --reverse "${OLD_TAG}..origin/mcp-resume-fork/stable" --pretty=%H > /tmp/fork-patch-commits.txt
 while read -r sha; do
   git cherry-pick "$sha"
 done < /tmp/fork-patch-commits.txt

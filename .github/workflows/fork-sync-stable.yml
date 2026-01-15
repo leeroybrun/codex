@@ -13,11 +13,11 @@ permissions:
 env:
   UPSTREAM_REPO: openai/codex
   UPSTREAM_REMOTE_URL: https://github.com/openai/codex.git
-  STABLE_BRANCH: fork/stable
+  STABLE_BRANCH: mcp-resume-fork/stable
 
 jobs:
   sync:
-    name: Sync fork/stable to latest upstream stable tag (if clean)
+    name: Sync mcp-resume-fork/stable to latest upstream stable tag (if clean)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
