@@ -1,0 +1,61 @@
+name: fork-artifacts (unsigned codex binaries)
+
+on:
+  push:
+    branches:
+      # Keep this tight so we don't burn Actions minutes on every feature branch.
+      - feat/mcp-codex-reply-session-recovery
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    name: Build — ${{ matrix.runner }} - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: codex-rs
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Minimal set for Happy usage: macOS (Apple Silicon) + Linux (glibc).
+          - runner: macos-14
+            target: aarch64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@1.90
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cargo build (release)
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build \
+            --target ${{ matrix.target }} \
+            --release \
+            --bin codex \
+            --bin codex-responses-api-proxy
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          dest="${{ runner.temp }}/dist/${{ matrix.target }}"
+          mkdir -p "$dest"
+
+          cp "target/${{ matrix.target }}/release/codex" "$dest/codex-${{ matrix.target }}"
+          cp "target/${{ matrix.target }}/release/codex-responses-api-proxy" "$dest/codex-responses-api-proxy-${{ matrix.target }}"
+
+          echo "Staged:"
+          ls -la "$dest"
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: codex-${{ github.sha }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/dist/${{ matrix.target }}/*
