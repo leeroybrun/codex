@@ -103,7 +103,7 @@ jobs:
 
           echo "Base: ${old_tag} -> ${new_tag}"
 
-      - name: Cherry-pick fork patches (fail if conflict)
+      - name: Cherry-pick fork patches (open PR even if some conflict)
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
         id: replay
         shell: bash
@@ -121,30 +121,39 @@ jobs:
             echo "applied=0" >> "$GITHUB_OUTPUT"
             echo "had_conflict=false" >> "$GITHUB_OUTPUT"
             echo "conflict_sha=" >> "$GITHUB_OUTPUT"
+            echo "failed_commits=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           applied=0
           conflict_sha=""
+          failed=()
           for sha in "${commits[@]}"; do
             echo "Cherry-picking ${sha}"
             if git cherry-pick "${sha}"; then
               applied=$((applied + 1))
             else
               conflict_sha="${sha}"
-              echo "Conflict encountered at ${sha}. Aborting this cherry-pick and proceeding to open a PR for manual resolution."
+              failed+=("${sha}")
+              echo "Conflict encountered at ${sha}. Aborting this cherry-pick and continuing with the remaining commits."
               git cherry-pick --abort || true
-              break
+              continue
             fi
           done
 
           echo "applied=${applied}" >> "$GITHUB_OUTPUT"
-          if [[ -n "${conflict_sha}" ]]; then
+          if ((${#failed[@]} > 0)); then
             echo "had_conflict=true" >> "$GITHUB_OUTPUT"
           else
             echo "had_conflict=false" >> "$GITHUB_OUTPUT"
           fi
           echo "conflict_sha=${conflict_sha}" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "failed_commits<<'EOF'"
+            printf '%s\n' "${failed[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Open PR
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
@@ -160,6 +169,15 @@ jobs:
             - Replay: applied ${{ steps.replay.outputs.applied }} commit(s)
             - Conflict: ${{ steps.replay.outputs.had_conflict }}
             - First conflict commit (if any): ${{ steps.replay.outputs.conflict_sha }}
+            - Failed commits (if any):
+            ${{ steps.replay.outputs.failed_commits }}
+
+            If there are failed commits, apply them manually on this PR branch (recommended locally):
+
+            - `git fetch origin`
+            - `git switch bot/sync-${{ steps.upstream.outputs.tag }}`
+            - For each failed SHA: `git cherry-pick <sha>` and resolve conflicts
+            - Push updates and GitHub will update this PR
 
             This PR was created by `.github/workflows/fork-sync-stable.yml`.
           base: ${{ env.STABLE_BRANCH }}
