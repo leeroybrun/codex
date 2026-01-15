@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Stdio;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncBufReadExt;
@@ -307,6 +308,39 @@ impl McpProcess {
                 JSONRPCMessage::Response(jsonrpc_response) => {
                     if jsonrpc_response.id == request_id {
                         return Ok(jsonrpc_response);
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn read_stream_until_response_messages(
+        &mut self,
+        request_ids: Vec<RequestId>,
+    ) -> anyhow::Result<HashMap<RequestId, JSONRPCResponse>> {
+        let mut remaining: HashSet<RequestId> = request_ids.into_iter().collect();
+        let mut responses: HashMap<RequestId, JSONRPCResponse> = HashMap::new();
+
+        eprintln!("in read_stream_until_response_messages({remaining:?})");
+
+        loop {
+            let message = self.read_jsonrpc_message().await?;
+            match message {
+                JSONRPCMessage::Notification(_) => {
+                    eprintln!("notification: {message:?}");
+                }
+                JSONRPCMessage::Request(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");
+                }
+                JSONRPCMessage::Error(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Error: {message:?}");
+                }
+                JSONRPCMessage::Response(jsonrpc_response) => {
+                    if remaining.remove(&jsonrpc_response.id) {
+                        responses.insert(jsonrpc_response.id.clone(), jsonrpc_response);
+                        if remaining.is_empty() {
+                            return Ok(responses);
+                        }
                     }
                 }
             }

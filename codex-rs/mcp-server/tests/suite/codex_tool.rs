@@ -128,13 +128,21 @@ async fn codex_reply_tool_resumes_from_rollout_when_not_in_memory() -> anyhow::R
         process: mut mcp_process,
         server: _server,
         dir,
-    } = create_mcp_process(vec![create_final_assistant_message_sse_response("OK")?]).await?;
+    } = create_mcp_process(vec![
+        create_final_assistant_message_sse_response("OK")?,
+        create_final_assistant_message_sse_response("OK")?,
+    ])
+    .await?;
 
     let conversation_id = ThreadId::new();
     let _rollout_path = write_minimal_rollout_file(dir.path(), conversation_id)?;
 
-    let reply_request_id = mcp_process
-        .send_codex_reply_tool_call(conversation_id.to_string(), "hello".to_string())
+    // Fire two concurrent reply tool calls for the same session to ensure resume is de-duplicated.
+    let reply_request_id_1 = mcp_process
+        .send_codex_reply_tool_call(conversation_id.to_string(), "hello 1".to_string())
+        .await?;
+    let reply_request_id_2 = mcp_process
+        .send_codex_reply_tool_call(conversation_id.to_string(), "hello 2".to_string())
         .await?;
 
     // The server should rehydrate and emit session_configured as a notification.
@@ -180,34 +188,45 @@ async fn codex_reply_tool_resumes_from_rollout_when_not_in_memory() -> anyhow::R
         "expected sandbox_policy to be restored from TurnContextItem"
     );
 
-    // Ensure the tool call completes.
-    let codex_response = timeout(
+    // Ensure both tool calls complete (responses can arrive in either order).
+    let responses = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp_process.read_stream_until_response_message(RequestId::Integer(reply_request_id)),
+        mcp_process.read_stream_until_response_messages(vec![
+            RequestId::Integer(reply_request_id_1),
+            RequestId::Integer(reply_request_id_2),
+        ]),
     )
     .await??;
 
-    assert_ne!(
-        codex_response
+    for request_id in [
+        RequestId::Integer(reply_request_id_1),
+        RequestId::Integer(reply_request_id_2),
+    ] {
+        let resp = responses
+            .get(&request_id)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("missing response for {request_id:?}"))?;
+        assert_ne!(
+            resp.result
+                .get("isError")
+                .and_then(serde_json::Value::as_bool),
+            Some(true),
+            "expected MCP tool response to not be marked as error"
+        );
+        let text = resp
             .result
-            .get("isError")
-            .and_then(serde_json::Value::as_bool),
-        Some(true),
-        "expected MCP tool response to not be marked as error"
-    );
-    let text = codex_response
-        .result
-        .get("content")
-        .and_then(|v| v.as_array())
-        .and_then(|arr| arr.first())
-        .and_then(|first| first.get("text"))
-        .and_then(|v| v.as_str())
-        .unwrap_or_default()
-        .to_string();
-    assert!(
-        text.contains("OK"),
-        "expected assistant output to include 'OK', got: {text:?}"
-    );
+            .get("content")
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.first())
+            .and_then(|first| first.get("text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            text.contains("OK"),
+            "expected assistant output to include 'OK', got: {text:?}"
+        );
+    }
 
     Ok(())
 }

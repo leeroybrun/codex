@@ -52,6 +52,7 @@ pub(crate) struct MessageProcessor {
     auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
     running_requests_id_to_codex_uuid: Arc<Mutex<HashMap<RequestId, ThreadId>>>,
+    resume_locks: Arc<Mutex<HashMap<ThreadId, Arc<Mutex<()>>>>>,
 }
 
 impl MessageProcessor {
@@ -127,6 +128,7 @@ impl MessageProcessor {
             auth_manager,
             thread_manager,
             running_requests_id_to_codex_uuid: Arc::new(Mutex::new(HashMap::new())),
+            resume_locks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -548,63 +550,61 @@ impl MessageProcessor {
             }
         };
 
-        // Clone outgoing to move into async task.
+        // Serialize *all* codex-reply activity per thread_id (resume + prompt submission + event streaming).
+        // Without this, two concurrent codex-reply calls would compete for the same thread event stream,
+        // and one of the requests can hang.
+        let per_thread_lock = {
+            let mut guard = self.resume_locks.lock().await;
+            guard
+                .entry(thread_id)
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+
+        // Clone state to move into the long-running task.
         let outgoing = self.outgoing.clone();
         let running_requests_id_to_codex_uuid = self.running_requests_id_to_codex_uuid.clone();
+        let thread_manager = self.thread_manager.clone();
+        let config = self.config.clone();
+        let auth_manager = self.auth_manager.clone();
+        let prompt = codex_tool_call_reply_param.prompt.clone();
 
-        let (thread, thread_id) = match self.thread_manager.get_thread(thread_id).await {
-            Ok(c) => (c, thread_id),
-            Err(_) => {
-                tracing::warn!(
-                    "Session not found for thread_id: {thread_id}; attempting resume from rollout"
-                );
+        tokio::spawn(async move {
+            let _guard = per_thread_lock.lock().await;
 
-                let rollout_path = match find_thread_path_by_id_str(
-                    &self.config.codex_home,
-                    &thread_id.to_string(),
-                )
-                .await
-                {
-                    Ok(Some(p)) => p,
-                    Ok(None) => {
-                        let result = CallToolResult {
-                            content: vec![ContentBlock::TextContent(TextContent {
-                                r#type: "text".to_owned(),
-                                text: format!("Session not found for thread_id: {thread_id}"),
-                                annotations: None,
-                            })],
-                            is_error: Some(true),
-                            structured_content: None,
-                        };
-                        outgoing.send_response(request_id, result).await;
-                        return;
-                    }
-                    Err(e) => {
-                        let result = CallToolResult {
-                            content: vec![ContentBlock::TextContent(TextContent {
-                                r#type: "text".to_owned(),
-                                text: format!(
-                                    "Failed to locate rollout for thread_id {thread_id}: {e}"
-                                ),
-                                annotations: None,
-                            })],
-                            is_error: Some(true),
-                            structured_content: None,
-                        };
-                        outgoing.send_response(request_id, result).await;
-                        return;
-                    }
-                };
+            let (thread, effective_thread_id) = match thread_manager.get_thread(thread_id).await {
+                Ok(existing) => (existing, thread_id),
+                Err(_) => {
+                    tracing::warn!(
+                        "Session not found for thread_id: {thread_id}; attempting resume from rollout"
+                    );
 
-                let initial_history =
-                    match RolloutRecorder::get_rollout_history(&rollout_path).await {
-                        Ok(h) => h,
+                    let rollout_path = match find_thread_path_by_id_str(
+                        &config.codex_home,
+                        &thread_id.to_string(),
+                    )
+                    .await
+                    {
+                        Ok(Some(p)) => p,
+                        Ok(None) => {
+                            let result = CallToolResult {
+                                content: vec![ContentBlock::TextContent(TextContent {
+                                    r#type: "text".to_owned(),
+                                    text: format!("Session not found for thread_id: {thread_id}"),
+                                    annotations: None,
+                                })],
+                                is_error: Some(true),
+                                structured_content: None,
+                            };
+                            outgoing.send_response(request_id, result).await;
+                            return;
+                        }
                         Err(e) => {
                             let result = CallToolResult {
                                 content: vec![ContentBlock::TextContent(TextContent {
                                     r#type: "text".to_owned(),
                                     text: format!(
-                                        "Failed to read rollout for thread_id {thread_id}: {e}"
+                                        "Failed to locate rollout for thread_id {thread_id}: {e}"
                                     ),
                                     annotations: None,
                                 })],
@@ -616,71 +616,81 @@ impl MessageProcessor {
                         }
                     };
 
-                let mut config = self.config.as_ref().clone();
-                Self::apply_resume_settings_from_rollout(&mut config, &initial_history);
-                let auth_manager = self.auth_manager.clone();
-                match self
-                    .thread_manager
-                    .resume_thread_with_history(config, initial_history, auth_manager)
-                    .await
-                {
-                    Ok(NewThread {
-                        thread_id: resumed_id,
-                        thread: conversation,
-                        session_configured,
-                    }) => {
-                        let session_configured_event = Event {
-                            id: "".to_string(),
-                            msg: EventMsg::SessionConfigured(session_configured.clone()),
+                    let initial_history =
+                        match RolloutRecorder::get_rollout_history(&rollout_path).await {
+                            Ok(h) => h,
+                            Err(e) => {
+                                let result = CallToolResult {
+                                    content: vec![ContentBlock::TextContent(TextContent {
+                                        r#type: "text".to_owned(),
+                                        text: format!(
+                                            "Failed to read rollout for thread_id {thread_id}: {e}"
+                                        ),
+                                        annotations: None,
+                                    })],
+                                    is_error: Some(true),
+                                    structured_content: None,
+                                };
+                                outgoing.send_response(request_id, result).await;
+                                return;
+                            }
                         };
-                        outgoing
-                            .send_event_as_notification(
-                                &session_configured_event,
-                                Some(OutgoingNotificationMeta {
-                                    request_id: Some(request_id.clone()),
-                                    thread_id: Some(resumed_id),
-                                }),
-                            )
-                            .await;
 
-                        (conversation, resumed_id)
-                    }
-                    Err(e) => {
-                        let result = CallToolResult {
-                            content: vec![ContentBlock::TextContent(TextContent {
-                                r#type: "text".to_owned(),
-                                text: format!(
-                                    "Failed to resume Codex session {thread_id} from rollout: {e}"
-                                ),
-                                annotations: None,
-                            })],
-                            is_error: Some(true),
-                            structured_content: None,
-                        };
-                        outgoing.send_response(request_id, result).await;
-                        return;
+                    let mut cfg = config.as_ref().clone();
+                    MessageProcessor::apply_resume_settings_from_rollout(&mut cfg, &initial_history);
+
+                    match thread_manager
+                        .resume_thread_with_history(cfg, initial_history, auth_manager.clone())
+                        .await
+                    {
+                        Ok(NewThread {
+                            thread_id: resumed_id,
+                            thread,
+                            session_configured,
+                        }) => {
+                            let session_configured_event = Event {
+                                id: "".to_string(),
+                                msg: EventMsg::SessionConfigured(session_configured.clone()),
+                            };
+                            outgoing
+                                .send_event_as_notification(
+                                    &session_configured_event,
+                                    Some(OutgoingNotificationMeta {
+                                        request_id: Some(request_id.clone()),
+                                        thread_id: Some(resumed_id),
+                                    }),
+                                )
+                                .await;
+                            (thread, resumed_id)
+                        }
+                        Err(e) => {
+                            let result = CallToolResult {
+                                content: vec![ContentBlock::TextContent(TextContent {
+                                    r#type: "text".to_owned(),
+                                    text: format!(
+                                        "Failed to resume Codex session {thread_id} from rollout: {e}"
+                                    ),
+                                    annotations: None,
+                                })],
+                                is_error: Some(true),
+                                structured_content: None,
+                            };
+                            outgoing.send_response(request_id, result).await;
+                            return;
+                        }
                     }
                 }
-            }
-        };
+            };
 
-        // Spawn the long-running reply handler.
-        tokio::spawn({
-            let outgoing = outgoing.clone();
-            let prompt = codex_tool_call_reply_param.prompt.clone();
-            let running_requests_id_to_codex_uuid = running_requests_id_to_codex_uuid.clone();
-
-            async move {
-                crate::codex_tool_runner::run_codex_tool_session_reply(
-                    thread_id,
-                    thread,
-                    outgoing,
-                    request_id,
-                    prompt,
-                    running_requests_id_to_codex_uuid,
-                )
-                .await;
-            }
+            crate::codex_tool_runner::run_codex_tool_session_reply(
+                effective_thread_id,
+                thread,
+                outgoing,
+                request_id,
+                prompt,
+                running_requests_id_to_codex_uuid,
+            )
+            .await;
         });
     }
 
