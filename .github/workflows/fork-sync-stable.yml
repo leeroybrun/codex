@@ -105,6 +105,7 @@ jobs:
 
       - name: Cherry-pick fork patches (fail if conflict)
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
+        id: replay
         shell: bash
         run: |
           set -euo pipefail
@@ -117,25 +118,48 @@ jobs:
 
           if ((${#commits[@]} == 0)); then
             echo "No fork patch commits found on ${stable_ref} above ${old_tag}. Nothing to replay."
+            echo "applied=0" >> "$GITHUB_OUTPUT"
+            echo "had_conflict=false" >> "$GITHUB_OUTPUT"
+            echo "conflict_sha=" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
+          applied=0
+          conflict_sha=""
           for sha in "${commits[@]}"; do
             echo "Cherry-picking ${sha}"
-            git cherry-pick "${sha}"
+            if git cherry-pick "${sha}"; then
+              applied=$((applied + 1))
+            else
+              conflict_sha="${sha}"
+              echo "Conflict encountered at ${sha}. Aborting this cherry-pick and proceeding to open a PR for manual resolution."
+              git cherry-pick --abort || true
+              break
+            fi
           done
+
+          echo "applied=${applied}" >> "$GITHUB_OUTPUT"
+          if [[ -n "${conflict_sha}" ]]; then
+            echo "had_conflict=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "had_conflict=false" >> "$GITHUB_OUTPUT"
+          fi
+          echo "conflict_sha=${conflict_sha}" >> "$GITHUB_OUTPUT"
 
       - name: Open PR
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
         uses: peter-evans/create-pull-request@v8
         with:
           branch: bot/sync-${{ steps.upstream.outputs.tag }}
-          title: "Sync fork/stable to ${{ steps.upstream.outputs.tag }}"
+          title: "Sync mcp-resume-fork/stable to ${{ steps.upstream.outputs.tag }}"
           body: |
             Automated stable-base bump for this fork.
 
             - From: ${{ steps.current.outputs.tag }}
             - To:   ${{ steps.upstream.outputs.tag }}
+            - Replay: applied ${{ steps.replay.outputs.applied }} commit(s)
+            - Conflict: ${{ steps.replay.outputs.had_conflict }}
+            - First conflict commit (if any): ${{ steps.replay.outputs.conflict_sha }}
 
             This PR was created by `.github/workflows/fork-sync-stable.yml`.
           base: ${{ env.STABLE_BRANCH }}
