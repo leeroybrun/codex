@@ -18,7 +18,7 @@ use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::default_client::USER_AGENT_SUFFIX;
 use codex_core::default_client::get_codex_user_agent;
-use codex_core::find_conversation_path_by_id_str;
+use codex_core::find_thread_path_by_id_str;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
 use codex_core::protocol::InitialHistory;
@@ -559,7 +559,7 @@ impl MessageProcessor {
                     "Session not found for thread_id: {thread_id}; attempting resume from rollout"
                 );
 
-                let rollout_path = match find_conversation_path_by_id_str(
+                let rollout_path = match find_thread_path_by_id_str(
                     &self.config.codex_home,
                     &thread_id.to_string(),
                 )
