@@ -8,7 +8,6 @@ use codex_core::protocol::FileChange;
 use codex_core::protocol::ReviewDecision;
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_mcp_server::CodexToolCallParam;
-use codex_mcp_server::CodexToolCallReplyParam;
 use codex_mcp_server::ExecApprovalElicitRequestParams;
 use codex_mcp_server::ExecApprovalResponse;
 use codex_mcp_server::PatchApprovalElicitRequestParams;
@@ -135,10 +134,7 @@ async fn codex_reply_tool_resumes_from_rollout_when_not_in_memory() -> anyhow::R
     let _rollout_path = write_minimal_rollout_file(dir.path(), conversation_id)?;
 
     let reply_request_id = mcp_process
-        .send_codex_reply_tool_call(CodexToolCallReplyParam {
-            conversation_id: conversation_id.to_string(),
-            prompt: "hello".to_string(),
-        })
+        .send_codex_reply_tool_call(conversation_id.to_string(), "hello".to_string())
         .await?;
 
     // The server should rehydrate and emit session_configured as a notification.

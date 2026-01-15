@@ -11,7 +11,6 @@ use tokio::process::ChildStdout;
 
 use anyhow::Context;
 use codex_mcp_server::CodexToolCallParam;
-use codex_mcp_server::CodexToolCallReplyParam;
 
 use mcp_types::CallToolRequestParams;
 use mcp_types::ClientCapabilities;
@@ -138,8 +137,9 @@ impl McpProcess {
 
         let initialized = self.read_jsonrpc_message().await?;
         let os_info = os_info::get();
+        let server_version = env!("CARGO_PKG_VERSION");
         let user_agent = format!(
-            "codex_cli_rs/0.0.0 ({} {}; {}) {} (elicitation test; 0.0.0)",
+            "codex_cli_rs/{server_version} ({} {}; {}) {} (elicitation test; 0.0.0)",
             os_info.os_type(),
             os_info.version(),
             os_info.architecture().unwrap_or("unknown"),
@@ -158,7 +158,7 @@ impl McpProcess {
                     "serverInfo": {
                         "name": "codex-mcp-server",
                         "title": "Codex",
-                        "version": "0.0.0",
+                        "version": server_version,
                         "user_agent": user_agent
                     },
                     "protocolVersion": mcp_types::MCP_SCHEMA_VERSION
@@ -199,11 +199,15 @@ impl McpProcess {
     /// correlating notifications.
     pub async fn send_codex_reply_tool_call(
         &mut self,
-        params: CodexToolCallReplyParam,
+        thread_id: String,
+        prompt: String,
     ) -> anyhow::Result<i64> {
         let codex_tool_call_params = CallToolRequestParams {
             name: "codex-reply".to_string(),
-            arguments: Some(serde_json::to_value(params)?),
+            arguments: Some(serde_json::json!({
+                "threadId": thread_id,
+                "prompt": prompt,
+            })),
         };
         self.send_request(
             mcp_types::CallToolRequest::METHOD,
