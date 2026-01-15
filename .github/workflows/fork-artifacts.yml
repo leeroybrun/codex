@@ -80,26 +80,57 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Use the latest stable upstream Rust release tag (production) from openai/codex.
+          # Determine the latest *stable production release tag that our current branch is based on*.
           #
-          # We intentionally do NOT derive this from the current commit history because the repo
-          # also contains rust-v0.0.<timestamp> tags and our fork may carry commits ahead/behind
-          # upstream main. We want the latest production tag name for release labeling.
-          latest_release_json="$(curl -fsSL \
-            -H "Accept: application/vnd.github+json" \
-            -H "Authorization: Bearer ${{ github.token }}" \
-            -H "X-GitHub-Api-Version: 2022-11-28" \
-            "https://api.github.com/repos/openai/codex/releases/latest")"
+          # Concretely: the newest ancestor tag of HEAD that corresponds to a non-draft,
+          # non-prerelease GitHub Release in openai/codex.
+          #
+          # We do it this way to avoid falsely labeling a fork build as "0.84.0" if our HEAD
+          # doesn't include that upstream release yet.
+          base_tag=""
+          mapfile -t candidates < <(
+            git tag -l 'rust-v*' --merged HEAD --sort=-creatordate
+          )
 
-          base_tag="$(echo "$latest_release_json" | jq -r '.tag_name')"
+          if ((${#candidates[@]} == 0)); then
+            echo "No rust-v* tags are ancestors of HEAD; cannot label release version."
+            exit 1
+          fi
 
-          if [[ -z "${base_tag}" || ! "${base_tag}" =~ ^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
-            echo "Failed to determine latest stable rust-vX.Y.Z tag from openai/codex releases/latest."
-            echo "Got tag_name='${base_tag}'"
+          for t in "${candidates[@]}"; do
+            # Fast filter: only consider version-like tags (no prerelease suffix).
+            if [[ ! "$t" =~ ^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
+              continue
+            fi
+
+            # Confirm this tag corresponds to a stable GitHub Release in openai/codex.
+            # (Works even when our fork doesn't have upstream's release workflow.)
+            rel_json="$(curl -fsSL \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer ${{ github.token }}" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              "https://api.github.com/repos/openai/codex/releases/tags/${t}" \
+              || true)"
+
+            if [[ -z "$rel_json" ]]; then
+              continue
+            fi
+
+            if echo "$rel_json" | jq -e '.draft == false and .prerelease == false' >/dev/null 2>&1; then
+              base_tag="$t"
+              break
+            fi
+          done
+
+          if [[ -z "${base_tag}" ]]; then
+            echo "Failed to determine a stable rust-vX.Y.Z release tag that is an ancestor of HEAD."
+            echo "Candidates (ancestors):"
+            printf '  - %s\n' "${candidates[@]}"
             exit 1
           fi
 
           base_version="${base_tag#rust-v}"
+          commits_since_tag="$(git rev-list --count "${base_tag}..HEAD")"
 
           build_number="${{ github.run_number }}"
           build_attempt="${{ github.run_attempt }}"
@@ -109,6 +140,7 @@ jobs:
 
           echo "base_tag=$base_tag" >> "$GITHUB_OUTPUT"
           echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
+          echo "commits_since_tag=$commits_since_tag" >> "$GITHUB_OUTPUT"
           echo "name=$name" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
@@ -129,6 +161,7 @@ jobs:
           tag_name: ${{ steps.version.outputs.tag }}
           body: |
             Base tag: ${{ steps.version.outputs.base_tag }}
+            Commits since base tag: ${{ steps.version.outputs.commits_since_tag }}
             Branch: ${{ github.ref_name }}
             Commit: ${{ github.sha }}
           files: dist/**/*
