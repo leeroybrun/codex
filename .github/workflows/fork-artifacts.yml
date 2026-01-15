@@ -27,6 +27,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          # Needed so `git describe --tags` works in the release job (tags).
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@1.90
         with:
@@ -59,3 +62,55 @@ jobs:
         with:
           name: codex-${{ github.sha }}-${{ matrix.target }}
           path: ${{ runner.temp }}/dist/${{ matrix.target }}/*
+
+  release:
+    name: Release (per-push)
+    runs-on: ubuntu-latest
+    needs: build
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Compute base version + release identifiers
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          base_tag="$(git describe --tags --match 'rust-v*' --abbrev=0)"
+          base_version="${base_tag#rust-v}"
+
+          build_number="${{ github.run_number }}"
+          build_attempt="${{ github.run_attempt }}"
+
+          name="${base_version}-build-${build_number}-a${build_attempt}"
+          tag="fork-rust-v${base_version}-build-${build_number}-a${build_attempt}"
+
+          echo "base_tag=$base_tag" >> "$GITHUB_OUTPUT"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: dist
+
+      - name: List staged artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -R dist/
+
+      - name: Create GitHub Release (and attach artifacts)
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ steps.version.outputs.name }}
+          tag_name: ${{ steps.version.outputs.tag }}
+          body: |
+            Base tag: ${{ steps.version.outputs.base_tag }}
+            Branch: ${{ github.ref_name }}
+            Commit: ${{ github.sha }}
+          files: dist/**/*
