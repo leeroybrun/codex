@@ -3,8 +3,8 @@ name: fork-artifacts (unsigned codex binaries)
 on:
   push:
     branches:
-      # Keep this tight so we don't burn Actions minutes on every feature branch.
-      - feat/mcp-codex-reply-session-recovery
+      # Build+release from the stable-base branch only, so the version label is truthful.
+      - fork/stable
   workflow_dispatch: {}
 
 jobs:

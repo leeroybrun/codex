@@ -1,0 +1,145 @@
+name: fork-sync-stable
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # Daily at 03:17 UTC (random-ish to avoid spikes).
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+env:
+  UPSTREAM_REPO: openai/codex
+  UPSTREAM_REMOTE_URL: https://github.com/openai/codex.git
+  STABLE_BRANCH: fork/stable
+
+jobs:
+  sync:
+    name: Sync fork/stable to latest upstream stable tag (if clean)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote + fetch tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git remote | grep -q '^upstream$'; then
+            git remote add upstream "${UPSTREAM_REMOTE_URL}"
+          fi
+          git fetch upstream --tags
+          git fetch origin
+
+      - name: Determine latest stable upstream tag
+        id: upstream
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Use GitHub "latest release" to avoid prereleases.
+          tag="$(curl -fsSL \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/${UPSTREAM_REPO}/releases/latest" \
+            | jq -r '.tag_name')"
+
+          if [[ -z "${tag}" || ! "${tag}" =~ ^rust-v[0-9]+\\.[0-9]+\\.[0-9]+$ ]]; then
+            echo "Could not determine a stable rust-vX.Y.Z tag from releases/latest. Got '${tag}'."
+            exit 1
+          fi
+
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+
+      - name: Determine current base tag of stable branch
+        id: current
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git show-ref --verify --quiet "refs/remotes/origin/${STABLE_BRANCH}"; then
+            echo "Missing branch origin/${STABLE_BRANCH}. Create it first (see docs/fork-maintenance.md)."
+            exit 1
+          fi
+
+          current_tag="$(git describe \
+            --tags \
+            --match 'rust-v[0-9]*.[0-9]*.[0-9]*' \
+            --abbrev=0 \
+            "origin/${STABLE_BRANCH}")"
+
+          echo "tag=${current_tag}" >> "$GITHUB_OUTPUT"
+
+      - name: No-op if already on latest stable
+        if: ${{ steps.current.outputs.tag == steps.upstream.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "origin/${STABLE_BRANCH} already based on ${{
+            steps.upstream.outputs.tag
+          }}; nothing to do."
+
+      - name: Create update branch from new tag
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          new_tag="${{ steps.upstream.outputs.tag }}"
+          old_tag="${{ steps.current.outputs.tag }}"
+
+          git switch --detach "${new_tag}"
+          git switch -c "bot/sync-${new_tag}"
+
+          echo "Base: ${old_tag} -> ${new_tag}"
+
+      - name: Cherry-pick fork patches (fail if conflict)
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          new_tag="${{ steps.upstream.outputs.tag }}"
+          old_tag="${{ steps.current.outputs.tag }}"
+          stable_ref="origin/${{ env.STABLE_BRANCH }}"
+
+          # Replay exactly the commits that are on the stable branch above the old tag.
+          mapfile -t commits < <(git log --reverse "${old_tag}..${stable_ref}" --pretty=%H)
+
+          if ((${#commits[@]} == 0)); then
+            echo "No fork patch commits found on ${stable_ref} above ${old_tag}. Nothing to replay."
+            exit 0
+          fi
+
+          for sha in "${commits[@]}"; do
+            echo "Cherry-picking ${sha}"
+            git cherry-pick "${sha}"
+          done
+
+      - name: Open PR
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
+        uses: peter-evans/create-pull-request@v8
+        with:
+          branch: bot/sync-${{ steps.upstream.outputs.tag }}
+          title: "Sync fork/stable to ${{ steps.upstream.outputs.tag }}"
+          body: |
+            Automated stable-base bump for this fork.
+
+            - From: ${{ steps.current.outputs.tag }}
+            - To:   ${{ steps.upstream.outputs.tag }}
+
+            This PR was created by `.github/workflows/fork-sync-stable.yml`.
+          base: ${{ env.STABLE_BRANCH }}
+          labels: |
+            maintenance
+          delete-branch: true
+
