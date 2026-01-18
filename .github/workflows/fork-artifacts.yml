@@ -170,7 +170,8 @@ jobs:
     permissions:
       contents: read
       id-token: write # for npm trusted publishing (OIDC)
-    if: ${{ env.ENABLE_FORK_NPM_PUBLISH == 'true' && env.FORK_NPM_PACKAGE_NAME != '' }}
+    # NOTE: job-level `if` cannot use the `env` context; use `vars` instead.
+    if: ${{ vars.ENABLE_FORK_NPM_PUBLISH == 'true' && vars.FORK_NPM_PACKAGE_NAME != '' }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -210,8 +211,9 @@ jobs:
       - name: Assemble npm staging directory
         shell: bash
         env:
-          PACKAGE_NAME: ${{ env.FORK_NPM_PACKAGE_NAME }}
+          PACKAGE_NAME: ${{ vars.FORK_NPM_PACKAGE_NAME }}
           NPM_VERSION: ${{ steps.version.outputs.npm_version }}
+          STAGING_DIR: ${{ runner.temp }}/codex-mcp-server-resume-npm
         run: |
           set -euo pipefail
           staging="${RUNNER_TEMP}/codex-mcp-server-resume-npm"
@@ -252,8 +254,6 @@ jobs:
             pkg.name = pkgName;
             fs.writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + "\n");
           NODE
-        env:
-          STAGING_DIR: ${{ runner.temp }}/codex-mcp-server-resume-npm
 
       - name: Create npm tarball
         id: pack
