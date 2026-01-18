@@ -1,4 +1,4 @@
-name: fork-artifacts (unsigned codex binaries)
+name: "[FORK] build + release artifacts (unsigned) + npm"
 
 on:
   push:

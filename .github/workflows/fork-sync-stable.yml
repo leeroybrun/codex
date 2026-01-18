@@ -1,4 +1,4 @@
-name: fork-sync-stable
+name: "[FORK] sync upstream stable tag → mcp-resume-fork/stable"
 
 on:
   workflow_dispatch: {}
