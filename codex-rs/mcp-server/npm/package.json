@@ -1,0 +1,23 @@
+{
+  "name": "@leeroy/codex-mcp-resume",
+  "version": "0.0.0-dev",
+  "license": "Apache-2.0",
+  "bin": {
+    "codex-mcp-resume": "bin/codex-mcp-server-resume.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=16"
+  },
+  "files": [
+    "bin",
+    "vendor",
+    "README.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/openai/codex.git",
+    "directory": "codex-rs/mcp-server/npm"
+  }
+}
+

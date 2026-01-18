@@ -1,5 +1,6 @@
 use std::path::Path;
 use std::process::Stdio;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncBufReadExt;
@@ -137,8 +138,9 @@ impl McpProcess {
 
         let initialized = self.read_jsonrpc_message().await?;
         let os_info = os_info::get();
+        let server_version = env!("CARGO_PKG_VERSION");
         let user_agent = format!(
-            "codex_cli_rs/0.0.0 ({} {}; {}) {} (elicitation test; 0.0.0)",
+            "codex_cli_rs/{server_version} ({} {}; {}) {} (elicitation test; 0.0.0)",
             os_info.os_type(),
             os_info.version(),
             os_info.architecture().unwrap_or("unknown"),
@@ -157,7 +159,7 @@ impl McpProcess {
                     "serverInfo": {
                         "name": "codex-mcp-server",
                         "title": "Codex",
-                        "version": "0.0.0",
+                        "version": server_version,
                         "user_agent": user_agent
                     },
                     "protocolVersion": mcp_types::MCP_SCHEMA_VERSION
@@ -186,6 +188,27 @@ impl McpProcess {
         let codex_tool_call_params = CallToolRequestParams {
             name: "codex".to_string(),
             arguments: Some(serde_json::to_value(params)?),
+        };
+        self.send_request(
+            mcp_types::CallToolRequest::METHOD,
+            Some(serde_json::to_value(codex_tool_call_params)?),
+        )
+        .await
+    }
+
+    /// Returns the id used to make the request so it can be used when
+    /// correlating notifications.
+    pub async fn send_codex_reply_tool_call(
+        &mut self,
+        thread_id: String,
+        prompt: String,
+    ) -> anyhow::Result<i64> {
+        let codex_tool_call_params = CallToolRequestParams {
+            name: "codex-reply".to_string(),
+            arguments: Some(serde_json::json!({
+                "threadId": thread_id,
+                "prompt": prompt,
+            })),
         };
         self.send_request(
             mcp_types::CallToolRequest::METHOD,
@@ -291,6 +314,39 @@ impl McpProcess {
         }
     }
 
+    pub async fn read_stream_until_response_messages(
+        &mut self,
+        request_ids: Vec<RequestId>,
+    ) -> anyhow::Result<HashMap<RequestId, JSONRPCResponse>> {
+        let mut remaining: HashSet<RequestId> = request_ids.into_iter().collect();
+        let mut responses: HashMap<RequestId, JSONRPCResponse> = HashMap::new();
+
+        eprintln!("in read_stream_until_response_messages({remaining:?})");
+
+        loop {
+            let message = self.read_jsonrpc_message().await?;
+            match message {
+                JSONRPCMessage::Notification(_) => {
+                    eprintln!("notification: {message:?}");
+                }
+                JSONRPCMessage::Request(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");
+                }
+                JSONRPCMessage::Error(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Error: {message:?}");
+                }
+                JSONRPCMessage::Response(jsonrpc_response) => {
+                    if remaining.remove(&jsonrpc_response.id) {
+                        responses.insert(jsonrpc_response.id.clone(), jsonrpc_response);
+                        if remaining.is_empty() {
+                            return Ok(responses);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     /// Reads notifications until a legacy TurnComplete event is observed:
     /// Method "codex/event" with params.msg.type == "task_complete".
     pub async fn read_stream_until_legacy_task_complete_notification(
@@ -309,6 +365,50 @@ impl McpProcess {
                                 .and_then(|m| m.get("type"))
                                 .and_then(|t| t.as_str())
                                 == Some("task_complete")
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+
+                    if is_match {
+                        return Ok(notification);
+                    } else {
+                        eprintln!("ignoring notification: {notification:?}");
+                    }
+                }
+                JSONRPCMessage::Request(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Request: {message:?}");
+                }
+                JSONRPCMessage::Error(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Error: {message:?}");
+                }
+                JSONRPCMessage::Response(_) => {
+                    anyhow::bail!("unexpected JSONRPCMessage::Response: {message:?}");
+                }
+            }
+        }
+    }
+
+    /// Reads notifications until a SessionConfigured event is observed:
+    /// Method "codex/event" with params.msg.type == "session_configured".
+    pub async fn read_stream_until_session_configured_notification(
+        &mut self,
+    ) -> anyhow::Result<JSONRPCNotification> {
+        eprintln!("in read_stream_until_session_configured_notification()");
+
+        loop {
+            let message = self.read_jsonrpc_message().await?;
+            match message {
+                JSONRPCMessage::Notification(notification) => {
+                    let is_match = if notification.method == "codex/event" {
+                        if let Some(params) = &notification.params {
+                            params
+                                .get("msg")
+                                .and_then(|m| m.get("type"))
+                                .and_then(|t| t.as_str())
+                                == Some("session_configured")
                         } else {
                             false
                         }
