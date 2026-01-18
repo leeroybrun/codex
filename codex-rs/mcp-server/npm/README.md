@@ -1,4 +1,4 @@
-# @leeroybrun/codex-mcp-server-resume
+# @leeroy/codex-mcp-resume
 
 Experimental npm distribution for a forked `codex-mcp-server` binary that supports
 resuming sessions from rollout JSONL files.
@@ -8,7 +8,7 @@ resuming sessions from rollout JSONL files.
 Run the MCP server via npx:
 
 ```bash
-npx -y @leeroybrun/codex-mcp-server-resume --help
+npx -y @leeroy/codex-mcp-resume --help
 ```
 
 The launcher selects the appropriate native binary for the current

@@ -12,7 +12,7 @@ env:
   # Configure in GitHub: Settings → Secrets and variables → Actions → Variables.
   ENABLE_FORK_NPM_PUBLISH: ${{ vars.ENABLE_FORK_NPM_PUBLISH }}
   # Must match codex-rs/mcp-server/npm/package.json "name".
-  # Example: @leeroybrun/codex-mcp-server-resume
+  # Example: @leeroy/codex-mcp-resume
   FORK_NPM_PACKAGE_NAME: ${{ vars.FORK_NPM_PACKAGE_NAME }}
 
 jobs:
@@ -273,4 +273,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm publish "${GITHUB_WORKSPACE}/dist-npm/${NPM_TARBALL}"
+          npm publish --access public "${GITHUB_WORKSPACE}/dist-npm/${NPM_TARBALL}"
