@@ -108,15 +108,17 @@ This repo includes a workflow that can:
 
 See `.github/workflows/fork-sync-stable.yml`.
 
+Note: if the upstream tag introduces changes under `.github/workflows/*`, the default `GITHUB_TOKEN` cannot
+push the upgrade branch. Configure the Actions secret `FORK_SYNC_PUSH_TOKEN` (PAT classic: `repo` + `workflow`)
+to enable fully automated upgrades.
+
 ## Fork artifacts + npm publishing
 
 ### GitHub Releases (fork builds)
 
 `.github/workflows/fork-artifacts.yml` builds and publishes **unsigned** fork artifacts on every push to:
 
-- `mcp-resume-fork/stable`
-
-Releases are named after the upstream stable base version plus the Actions build number, e.g.:- `0.84.0-build-123-a1`
+- `mcp-resume-fork/stable`Releases are named after the upstream stable base version plus the Actions build number, e.g.:- `0.84.0-build-123-a1`
 
 ### npm package (optional, gated)
 
