@@ -1,0 +1,70 @@
+name: "[FORK] npm dist-tag (manual)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      package:
+        description: "NPM package name (defaults to vars.FORK_NPM_PACKAGE_NAME)"
+        required: false
+        type: string
+      tag:
+        description: "Dist-tag name to set"
+        required: true
+        default: "happy-codex-resume"
+        type: string
+      version:
+        description: "Version to tag (defaults to npm 'latest')"
+        required: false
+        type: string
+
+jobs:
+  dist_tag:
+    name: "Set dist-tag"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Update npm
+        run: npm install -g npm@latest
+
+      - name: Set dist-tag
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          INPUT_PACKAGE: ${{ inputs.package }}
+          INPUT_TAG: ${{ inputs.tag }}
+          INPUT_VERSION: ${{ inputs.version }}
+          DEFAULT_PACKAGE: ${{ vars.FORK_NPM_PACKAGE_NAME }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ -z "${NODE_AUTH_TOKEN:-}" ]]; then
+            echo "Missing secrets.NPM_TOKEN. Create an npm automation token with permission to manage dist-tags."
+            exit 1
+          fi
+
+          pkg="${INPUT_PACKAGE:-}"
+          if [[ -z "$pkg" ]]; then
+            pkg="${DEFAULT_PACKAGE:-}"
+          fi
+          if [[ -z "$pkg" ]]; then
+            echo "Missing package name. Provide inputs.package or set vars.FORK_NPM_PACKAGE_NAME."
+            exit 1
+          fi
+
+          tag="${INPUT_TAG:-}"
+          if [[ -z "$tag" ]]; then
+            echo "Missing inputs.tag"
+            exit 1
+          fi
+
+          ver="${INPUT_VERSION:-}"
+          if [[ -z "$ver" ]]; then
+            ver="$(npm view "$pkg" version)"
+          fi
