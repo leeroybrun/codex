@@ -122,14 +122,19 @@ jobs:
           git checkout -B "${merge_branch}" "origin/${STABLE_BRANCH}"
 
       - name: "Guard: upstream updated workflow files but no push token configured"
-        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && secrets.FORK_SYNC_PUSH_TOKEN == '' }}
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
         shell: bash
+        env:
+          PUSH_TOKEN: ${{ secrets.FORK_SYNC_PUSH_TOKEN }}
         run: |
           set -euo pipefail
           new_tag="${{ steps.prep.outputs.new_tag }}"
           old_tag="${{ steps.prep.outputs.old_tag }}"
 
           if git diff --name-only "${old_tag}..${new_tag}" -- .github/workflows | grep -q '.'; then
+            if [[ -n "${PUSH_TOKEN:-}" ]]; then
+              exit 0
+            fi
             echo "Upstream changed files under .github/workflows between ${old_tag} and ${new_tag}."
             echo "The default GITHUB_TOKEN cannot push workflow file updates."
             echo "Set the Actions secret FORK_SYNC_PUSH_TOKEN (PAT classic: repo + workflow) and rerun."
