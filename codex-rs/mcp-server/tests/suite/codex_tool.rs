@@ -62,13 +62,14 @@ fn write_minimal_rollout_file(
 
     let session_meta = SessionMeta {
         id: conversation_id,
+        forked_from_id: None,
         timestamp: "2025-01-01T00:00:00.000Z".to_string(),
         cwd: codex_home.to_path_buf(),
         originator: "mcp-server-test".to_string(),
         cli_version: "0.0.0".to_string(),
-        instructions: None,
         source: SessionSource::Mcp,
         model_provider: Some("mock_provider".to_string()),
+        base_instructions: None,
     };
     let line = RolloutLine {
         timestamp: "2025-01-01T00:00:00.000Z".to_string(),
@@ -88,7 +89,6 @@ fn write_minimal_rollout_file(
         model: "rollout-model".to_string(),
         effort: None,
         summary: Default::default(),
-        base_instructions: None,
         user_instructions: None,
         developer_instructions: None,
         final_output_json_schema: None,

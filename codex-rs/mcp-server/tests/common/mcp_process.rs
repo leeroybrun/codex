@@ -1,6 +1,7 @@
+use std::collections::HashMap;
+use std::collections::HashSet;
 use std::path::Path;
 use std::process::Stdio;
-use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
 use tokio::io::AsyncBufReadExt;
@@ -160,7 +161,7 @@ impl McpProcess {
                     "serverInfo": {
                         "name": "codex-mcp-server",
                         "title": "Codex",
-                        "version": server_version,
+                        "version": build_version,
                         "user_agent": user_agent
                     },
                     "protocolVersion": mcp_types::MCP_SCHEMA_VERSION

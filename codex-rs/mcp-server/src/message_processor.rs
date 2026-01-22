@@ -637,7 +637,10 @@ impl MessageProcessor {
                         };
 
                     let mut cfg = config.as_ref().clone();
-                    MessageProcessor::apply_resume_settings_from_rollout(&mut cfg, &initial_history);
+                    MessageProcessor::apply_resume_settings_from_rollout(
+                        &mut cfg,
+                        &initial_history,
+                    );
 
                     match thread_manager
                         .resume_thread_with_history(cfg, initial_history, auth_manager.clone())
