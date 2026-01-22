@@ -16,8 +16,25 @@ env:
   FORK_NPM_PACKAGE_NAME: ${{ vars.FORK_NPM_PACKAGE_NAME }}
 
 jobs:
+  precheck:
+    name: Precheck (tests)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: codex-rs
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@1.92
+
+      - name: cargo test -p codex-mcp-server
+        run: cargo test -p codex-mcp-server
+
   build:
     name: Build — ${{ matrix.runner }} - ${{ matrix.target }}
+    needs: precheck
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     defaults:
