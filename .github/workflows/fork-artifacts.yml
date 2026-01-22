@@ -275,4 +275,4 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          npm publish --access public "${GITHUB_WORKSPACE}/dist-npm/${NPM_TARBALL}"
+          npm publish --access public --tag latest "${GITHUB_WORKSPACE}/dist-npm/${NPM_TARBALL}"
