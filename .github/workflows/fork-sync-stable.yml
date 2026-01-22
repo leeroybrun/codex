@@ -14,9 +14,6 @@ env:
   UPSTREAM_REPO: openai/codex
   UPSTREAM_REMOTE_URL: https://github.com/openai/codex.git
   STABLE_BRANCH: mcp-resume-fork/stable
-  # Optional: set `FORK_SYNC_PUSH_TOKEN` (PAT classic: `repo` + `workflow`) to allow pushing
-  # branches that include changes under `.github/workflows/*`.
-  PUSH_TOKEN: ${{ secrets.FORK_SYNC_PUSH_TOKEN || github.token }}
 
 jobs:
   sync:
@@ -26,7 +23,9 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
-          token: ${{ env.PUSH_TOKEN }}
+          # Optional: set `FORK_SYNC_PUSH_TOKEN` (PAT classic: `repo` + `workflow`) to allow pushing
+          # branches that include changes under `.github/workflows/*`.
+          token: ${{ secrets.FORK_SYNC_PUSH_TOKEN || github.token }}
 
       - name: Configure git
         shell: bash
@@ -177,7 +176,7 @@ jobs:
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && steps.merge.outputs.mode == 'merge' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ env.PUSH_TOKEN }}
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PUSH_TOKEN || github.token }}
         run: |
           set -euo pipefail
           new_tag="${{ steps.prep.outputs.new_tag }}"
@@ -193,7 +192,7 @@ jobs:
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag && steps.merge.outputs.mode == 'tag-pr' }}
         shell: bash
         env:
-          GH_TOKEN: ${{ env.PUSH_TOKEN }}
+          GH_TOKEN: ${{ secrets.FORK_SYNC_PUSH_TOKEN || github.token }}
         run: |
           set -euo pipefail
           new_tag="${{ steps.prep.outputs.new_tag }}"

@@ -9,6 +9,9 @@
   "engines": {
     "node": ">=16"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "files": [
     "bin",
     "vendor",
@@ -20,4 +23,3 @@
     "directory": "codex-rs/mcp-server/npm"
   }
 }
-
