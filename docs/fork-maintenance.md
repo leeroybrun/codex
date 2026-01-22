@@ -108,3 +108,33 @@ This repo includes a workflow that can:
 
 See `.github/workflows/fork-sync-stable.yml`.
 
+## Fork artifacts + npm publishing
+
+### GitHub Releases (fork builds)
+
+`.github/workflows/fork-artifacts.yml` builds and publishes **unsigned** fork artifacts on every push to:
+
+- `mcp-resume-fork/stable`
+
+Releases are named after the upstream stable base version plus the Actions build number, e.g.:- `0.84.0-build-123-a1`
+
+### npm package (optional, gated)
+
+The same workflow can also package and publish an **experimental** npm package for the forked MCP server
+(`codex-mcp-server`) that includes resume-from-rollout support.
+
+Publishing is **disabled by default** and is gated behind GitHub Actions repo variables:- `ENABLE_FORK_NPM_PUBLISH`: set to `"true"` to enable publishing
+- `FORK_NPM_PACKAGE_NAME`: example `@leeroybrun/codex-mcp-server-resume`
+
+The published npm version is semver and is derived from the upstream base version plus the Actions run, e.g.:
+
+- `0.84.0-resume.123.a1`
+
+#### What you (maintainer) must set up on npm
+
+To actually publish from GitHub Actions without an `NPM_TOKEN`, configure **npm trusted publishing (OIDC)**:
+
+- Create the package under your npm scope (once).
+- Configure the package to trust this GitHub repo/workflow as a publisher.
+
+Once configured, enabling the repo variables above will make publishes automatic on pushes to `mcp-resume-fork/stable`.
