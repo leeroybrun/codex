@@ -3,6 +3,8 @@
   "private": true,
   "description": "Tools for repo-wide maintenance.",
   "scripts": {
+    "npm:dist-tag": "node scripts/npm_dist_tag.js",
+    "npm:dist-tag:happy": "node scripts/npm_dist_tag.js --tag happy-codex-resume",
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js"
   },

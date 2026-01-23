@@ -141,6 +141,10 @@ jobs:
             exit 1
           fi
 
+      - name: Setup Rust (for lockfile regeneration)
+        if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Attempt merge of new upstream tag into stable (preferred)
         if: ${{ steps.current.outputs.tag != steps.upstream.outputs.tag }}
         id: merge
@@ -155,9 +159,62 @@ jobs:
             git commit -m "Merge ${new_tag} into ${STABLE_BRANCH}"
             echo "mode=merge" >> "$GITHUB_OUTPUT"
           else
-            echo "Merge conflict. Leaving this for a tag-based PR so conflicts are visible in GitHub UI."
-            git merge --abort || true
-            echo "mode=tag-pr" >> "$GITHUB_OUTPUT"
+            echo "Merge conflict detected. Checking if it's auto-resolvable..."
+
+            conflicted="$(git diff --name-only --diff-filter=U || true)"
+            echo "Conflicted files:"
+            echo "${conflicted:-<none>}"
+
+            auto_resolvable=true
+            while IFS= read -r path; do
+              [[ -z "${path}" ]] && continue
+              case "${path}" in
+                codex-rs/Cargo.toml|codex-rs/Cargo.lock) ;;
+                *) auto_resolvable=false ;;
+              esac
+            done <<< "${conflicted}"
+
+            if [[ "${auto_resolvable}" == "true" && -n "${conflicted}" ]]; then
+              echo "Auto-resolving Cargo version/lockfile conflicts using upstream (theirs)..."
+
+              if printf '%s\n' "${conflicted}" | grep -qx "codex-rs/Cargo.toml"; then
+                git checkout --theirs -- codex-rs/Cargo.toml
+                git add codex-rs/Cargo.toml
+              fi
+
+              if printf '%s\n' "${conflicted}" | grep -qx "codex-rs/Cargo.lock"; then
+                git checkout --theirs -- codex-rs/Cargo.lock
+
+                # Ensure the lockfile matches the merged manifests (and eliminates any propagation lag
+                # from upstream's lockfile generation).
+                if ! (
+                  cd codex-rs
+                  cargo generate-lockfile
+                ); then
+                  echo "cargo generate-lockfile failed; falling back to a tag-based PR."
+                  git merge --abort || true
+                  echo "mode=tag-pr" >> "$GITHUB_OUTPUT"
+                  exit 0
+                fi
+
+                git add codex-rs/Cargo.lock
+              fi
+
+              remaining="$(git diff --name-only --diff-filter=U || true)"
+              if [[ -n "${remaining}" ]]; then
+                echo "Auto-resolution incomplete; remaining conflicts:"
+                echo "${remaining}"
+                git merge --abort || true
+                echo "mode=tag-pr" >> "$GITHUB_OUTPUT"
+              else
+                git commit -m "Merge ${new_tag} into ${STABLE_BRANCH}"
+                echo "mode=merge" >> "$GITHUB_OUTPUT"
+              fi
+            else
+              echo "Merge conflict. Leaving this for a tag-based PR so conflicts are visible in GitHub UI."
+              git merge --abort || true
+              echo "mode=tag-pr" >> "$GITHUB_OUTPUT"
+            fi
           fi
 
       - name: Push merge attempt branch (clean merges only)

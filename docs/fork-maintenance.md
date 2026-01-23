@@ -11,7 +11,7 @@ The goal is:
 
 - **`mcp-resume-fork/stable`** (stable branch): upstream stable tag + our fork patches on top.
   - This is the branch we build/release from.
-- **`fork/patches`** (optional, but recommended): *only* our fork commits (no upstream merges).
+- **`fork/patches`** (optional, but recommended): _only_ our fork commits (no upstream merges).
   - This branch is the source-of-truth for “our changes” and is what we replay onto new tags.
 
 If you don’t want a separate `fork/patches` branch, you can still upgrade by replaying
@@ -96,17 +96,25 @@ cargo build -p codex-cli
 git push -u origin "bot/sync-${NEW_TAG}"
 ```
 
-Open a PR to merge `bot/sync-${NEW_TAG}` → `fork/stable`.
+Open a PR to merge `bot/sync-${NEW_TAG}` → `mcp-resume-fork/stable`.
 
 ## Automation (GitHub Actions)
 
 This repo includes a workflow that can:
 
 - detect a new upstream stable tag
-- attempt to replay our patch commits onto it
-- open a PR automatically when conflict-free
+- attempt a clean merge of the upstream tag into `mcp-resume-fork/stable`
+- auto-resolve the common Cargo version/lockfile conflicts
+- open a PR automatically when conflict-free (otherwise it opens a PR with conflicts)
 
 See `.github/workflows/fork-sync-stable.yml`.
+
+### Conflict resolution rules
+
+If you hit merge conflicts in:
+
+- `codex-rs/Cargo.toml` (`[workspace.package].version`): keep the upstream tag value.
+- `codex-rs/Cargo.lock`: after resolving, run `cargo generate-lockfile` from `codex-rs/`.
 
 Note: if the upstream tag introduces changes under `.github/workflows/*`, the default `GITHUB_TOKEN` cannot
 push the upgrade branch. Configure the Actions secret `FORK_SYNC_PUSH_TOKEN` (PAT classic: `repo` + `workflow`)
@@ -118,14 +126,20 @@ to enable fully automated upgrades.
 
 `.github/workflows/fork-artifacts.yml` builds and publishes **unsigned** fork artifacts on every push to:
 
-- `mcp-resume-fork/stable`Releases are named after the upstream stable base version plus the Actions build number, e.g.:- `0.84.0-build-123-a1`
+- `mcp-resume-fork/stable`
+
+Releases are named after the upstream stable base version plus the Actions build number, e.g.:
+
+- `0.84.0-build-123-a1`
 
 ### npm package (optional, gated)
 
 The same workflow can also package and publish an **experimental** npm package for the forked MCP server
 (`codex-mcp-server`) that includes resume-from-rollout support.
 
-Publishing is **disabled by default** and is gated behind GitHub Actions repo variables:- `ENABLE_FORK_NPM_PUBLISH`: set to `"true"` to enable publishing
+Publishing is **disabled by default** and is gated behind GitHub Actions repo variables:
+
+- `ENABLE_FORK_NPM_PUBLISH`: set to `"true"` to enable publishing
 - `FORK_NPM_PACKAGE_NAME`: example `@leeroybrun/codex-mcp-server-resume`
 
 The published npm version is semver and is derived from the upstream base version plus the Actions run, e.g.:
@@ -140,3 +154,13 @@ To actually publish from GitHub Actions without an `NPM_TOKEN`, configure **npm 
 - Configure the package to trust this GitHub repo/workflow as a publisher.
 
 Once configured, enabling the repo variables above will make publishes automatic on pushes to `mcp-resume-fork/stable`.
+
+#### Dist-tags (manual)
+
+To repoint a dist-tag (e.g. `happy-codex-resume`) to the current npm `latest` for the forked MCP package:
+
+- `npm run npm:dist-tag:happy`
+
+To tag a specific version:
+
+- `npm run npm:dist-tag -- --tag happy-codex-resume --version 0.84.0-resume.123.a1`

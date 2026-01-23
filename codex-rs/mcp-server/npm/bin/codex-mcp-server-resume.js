@@ -61,7 +61,8 @@ if (!targetTriple) {
 
 const vendorRoot = path.join(__dirname, "..", "vendor");
 const archRoot = path.join(vendorRoot, targetTriple);
-const binaryName = process.platform === "win32" ? "codex-mcp-server.exe" : "codex-mcp-server";
+const binaryName =
+  process.platform === "win32" ? "codex-mcp-server.exe" : "codex-mcp-server";
 const binaryPath = path.join(archRoot, "codex-mcp-server", binaryName);
 
 if (!existsSync(binaryPath)) {
@@ -101,4 +102,3 @@ if (childResult.type === "signal") {
 } else {
   process.exit(childResult.exitCode);
 }
-
