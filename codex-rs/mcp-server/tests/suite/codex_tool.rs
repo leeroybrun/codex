@@ -87,6 +87,8 @@ fn write_minimal_rollout_file(
         approval_policy: AskForApproval::Never,
         sandbox_policy: SandboxPolicy::ReadOnly,
         model: "rollout-model".to_string(),
+        personality: None,
+        collaboration_mode: None,
         effort: None,
         summary: Default::default(),
         user_instructions: None,
